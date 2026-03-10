@@ -1,14 +1,16 @@
+import 'dotenv/config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
-const SOURCE_URL = process.env.SOURCE_WS_URL ?? 'wss://premws-pt1.365lpodds.com/zap/?uid=015800383588380318';
+const SOURCE_URL = process.env.SOURCE_WS_URL ?? '';
 const SOURCE_PROTOCOL = process.env.SOURCE_WS_PROTOCOL ?? 'zap-protocol-v2';
 const LOCAL_TARGET_URL = process.env.LOCAL_TARGET_WS_URL ?? '';
 const OUTPUT_FILE = process.env.OUTPUT_FILE ?? 'messages.json';
 const PING_INTERVAL_MS = Number(process.env.PING_INTERVAL_MS ?? 20_000);
 const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS ?? 5_000);
+const RECONNECT_ON_403 = process.env.RECONNECT_ON_403 === 'true';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +36,7 @@ let flushQueue = Promise.resolve();
 let shuttingDown = false;
 let sourceSocket;
 let localSocket;
+let stopSourceReconnect = false;
 
 const toPrintable = (text) =>
   text
@@ -133,6 +136,17 @@ const connectLocalSocket = () => {
 };
 
 const connectSourceSocket = () => {
+  if (!SOURCE_URL) {
+    console.error(
+      '[source] SOURCE_WS_URL is not set. Add a fresh URL from your authenticated bet365 browser session (wss://.../zap/?uid=...).',
+    );
+    return;
+  }
+
+  if (!SOURCE_URL.includes('uid=')) {
+    console.error('[source] SOURCE_WS_URL is missing uid=... and is likely invalid.');
+  }
+
   sourceSocket = new WebSocket(SOURCE_URL, SOURCE_PROTOCOL, {
     headers: sourceHeaders,
     perMessageDeflate: true,
@@ -163,9 +177,15 @@ const connectSourceSocket = () => {
 
   sourceSocket.on('error', (error) => {
     if (error.message.includes('Unexpected server response: 403')) {
+      stopSourceReconnect = !RECONNECT_ON_403;
       console.error(
-        '[source] WebSocket error: 403 Forbidden. Provide a fresh SOURCE_WS_URL uid and optionally SOURCE_COOKIE from an authenticated bet365 browser session.',
+        '[source] WebSocket error: 403 Forbidden. Use a fresh SOURCE_WS_URL uid and optionally SOURCE_COOKIE from an authenticated bet365 browser session.',
       );
+
+      if (stopSourceReconnect) {
+        console.error('[source] Auto-reconnect disabled after 403. Set RECONNECT_ON_403=true to keep retrying.');
+      }
+
       return;
     }
 
@@ -174,6 +194,11 @@ const connectSourceSocket = () => {
 
   sourceSocket.on('close', (code, reasonBuffer) => {
     console.warn(`[source] Closed (code=${code}, reason=${reasonBuffer.toString()})`);
+
+    if (stopSourceReconnect) {
+      return;
+    }
+
     scheduleReconnect('source', connectSourceSocket);
   });
 };
