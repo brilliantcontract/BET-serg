@@ -15,6 +15,18 @@ const PING_INTERVAL_MS = Number(process.env.PING_INTERVAL_MS ?? 20_000);
 const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS ?? 5_000);
 const RECONNECT_ON_403 = process.env.RECONNECT_ON_403 === 'true';
 
+const COOKIE_ATTRIBUTES = new Set([
+  'path',
+  'domain',
+  'expires',
+  'max-age',
+  'secure',
+  'httponly',
+  'samesite',
+  'priority',
+  'partitioned',
+]);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const outputPath = path.resolve(__dirname, OUTPUT_FILE);
@@ -72,7 +84,16 @@ const parseCookiePairs = (rawCookie) => {
   return text
     .split(';')
     .map((pair) => pair.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((pair) => {
+      const separator = pair.indexOf('=');
+      if (separator === -1) {
+        return false;
+      }
+
+      const name = pair.slice(0, separator).trim().toLowerCase();
+      return !COOKIE_ATTRIBUTES.has(name);
+    });
 };
 
 const readCookieFromFile = async () => {
@@ -92,14 +113,18 @@ const readCookieFromFile = async () => {
 
 const sourceHeaders = {
   Origin: process.env.SOURCE_ORIGIN ?? 'https://www.bet365.com',
-  Referer: process.env.SOURCE_REFERER ?? 'https://www.bet365.com/',
   'Cache-Control': 'no-cache',
   Pragma: 'no-cache',
-  'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8,uk;q=0.7',
+  'Accept-Language': process.env.SOURCE_ACCEPT_LANGUAGE ?? 'en-CA,en-US;q=0.9,en;q=0.8',
   'User-Agent':
     process.env.USER_AGENT ??
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0',
 };
+
+const refererHeader = process.env.SOURCE_REFERER;
+if (refererHeader) {
+  sourceHeaders.Referer = refererHeader;
+}
 
 const messages = [];
 let flushQueue = Promise.resolve();
@@ -239,6 +264,7 @@ const connectSourceSocket = async () => {
   });
 
   sourceSocket.on('open', () => {
+    stopSourceReconnect = false;
     console.log(`[source] Connected: ${SOURCE_URL}`);
   });
 
@@ -265,7 +291,7 @@ const connectSourceSocket = async () => {
     if (error.message.includes('Unexpected server response: 403')) {
       stopSourceReconnect = !RECONNECT_ON_403;
       console.error(
-        '[source] WebSocket error: 403 Forbidden. Use a fresh SOURCE_WS_URL uid and optionally SOURCE_COOKIE from an authenticated bet365 browser session.',
+        '[source] WebSocket error: 403 Forbidden. This usually means the uid expired or headers/cookies do not match a live browser session.',
       );
 
       if (stopSourceReconnect) {
