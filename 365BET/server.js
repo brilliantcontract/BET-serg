@@ -10,6 +10,7 @@ const SOURCE_URL =
 const SOURCE_PROTOCOL = process.env.SOURCE_WS_PROTOCOL ?? 'zap-protocol-v2';
 const LOCAL_TARGET_URL = process.env.LOCAL_TARGET_WS_URL ?? '';
 const OUTPUT_FILE = process.env.OUTPUT_FILE ?? 'messages.json';
+const SOURCE_COOKIE_FILE = process.env.SOURCE_COOKIE_FILE ?? '';
 const PING_INTERVAL_MS = Number(process.env.PING_INTERVAL_MS ?? 20_000);
 const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS ?? 5_000);
 const RECONNECT_ON_403 = process.env.RECONNECT_ON_403 === 'true';
@@ -17,6 +18,77 @@ const RECONNECT_ON_403 = process.env.RECONNECT_ON_403 === 'true';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const outputPath = path.resolve(__dirname, OUTPUT_FILE);
+
+const parseCookiePairs = (rawCookie) => {
+  const text = String(rawCookie ?? '').trim();
+  if (!text) {
+    return [];
+  }
+
+  if (text.startsWith('[') || text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => {
+            if (!item || typeof item !== 'object') {
+              return null;
+            }
+
+            if (typeof item.name !== 'string' || typeof item.value !== 'string') {
+              return null;
+            }
+
+            return `${item.name}=${item.value}`;
+          })
+          .filter(Boolean);
+      }
+
+      if (parsed && typeof parsed === 'object') {
+        return Object.entries(parsed)
+          .map(([name, value]) => {
+            if (!name || value == null) {
+              return null;
+            }
+
+            return `${name}=${String(value)}`;
+          })
+          .filter(Boolean);
+      }
+    } catch {
+      // ignore and continue as plain string
+    }
+  }
+
+  if (!text.includes('=') && /\s+/.test(text)) {
+    const [name, ...parts] = text.split(/\s+/).filter(Boolean);
+    if (name && parts.length > 0) {
+      const value = parts.join(' ').replace(/^"|"$/g, '');
+      return [`${name}=${value}`];
+    }
+  }
+
+  return text
+    .split(';')
+    .map((pair) => pair.trim())
+    .filter(Boolean);
+};
+
+const readCookieFromFile = async () => {
+  if (!SOURCE_COOKIE_FILE) {
+    return '';
+  }
+
+  try {
+    const raw = await fs.readFile(path.resolve(__dirname, SOURCE_COOKIE_FILE), 'utf8');
+    const parsed = parseCookiePairs(raw);
+    return parsed.join('; ');
+  } catch (error) {
+    console.error(`[source] Failed to read SOURCE_COOKIE_FILE=${SOURCE_COOKIE_FILE}:`, error.message);
+    return '';
+  }
+};
 
 const sourceHeaders = {
   Origin: process.env.SOURCE_ORIGIN ?? 'https://www.bet365.com',
@@ -28,10 +100,6 @@ const sourceHeaders = {
     process.env.USER_AGENT ??
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
 };
-
-if (process.env.SOURCE_COOKIE) {
-  sourceHeaders.Cookie = process.env.SOURCE_COOKIE;
-}
 
 const messages = [];
 let flushQueue = Promise.resolve();
@@ -137,7 +205,7 @@ const connectLocalSocket = () => {
   });
 };
 
-const connectSourceSocket = () => {
+const connectSourceSocket = async () => {
   if (!SOURCE_URL) {
     console.error(
       '[source] SOURCE_WS_URL is not set. Add a fresh URL from your authenticated bet365 browser session (wss://.../zap/?uid=...).',
@@ -147,6 +215,22 @@ const connectSourceSocket = () => {
 
   if (!SOURCE_URL.includes('uid=')) {
     console.error('[source] SOURCE_WS_URL is missing uid=... and is likely invalid.');
+  }
+
+  const cookieFromEnv = parseCookiePairs(process.env.SOURCE_COOKIE).join('; ');
+  const cookieFromFile = await readCookieFromFile();
+  const cookieHeader = cookieFromEnv || cookieFromFile;
+
+  if (cookieHeader) {
+    sourceHeaders.Cookie = cookieHeader;
+    const cookieCount = cookieHeader.split(';').filter(Boolean).length;
+    if (cookieCount < 2) {
+      console.warn(
+        '[source] Cookie header has very few entries. A single Cloudflare cookie (e.g. __cf_bm) is often not enough and may still return 403.',
+      );
+    }
+  } else {
+    delete sourceHeaders.Cookie;
   }
 
   sourceSocket = new WebSocket(SOURCE_URL, SOURCE_PROTOCOL, {
