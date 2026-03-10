@@ -4,7 +4,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
-const SOURCE_URL = process.env.SOURCE_WS_URL ?? '';
+const SOURCE_URL =
+  process.env.SOURCE_WS_URL ??
+  'wss://premws-pt1.365lpodds.com/zap/?uid=015800383588380318';
 const SOURCE_PROTOCOL = process.env.SOURCE_WS_PROTOCOL ?? 'zap-protocol-v2';
 const LOCAL_TARGET_URL = process.env.LOCAL_TARGET_WS_URL ?? '';
 const OUTPUT_FILE = process.env.OUTPUT_FILE ?? 'messages.json';
